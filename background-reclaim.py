@@ -14,7 +14,7 @@ parser.add_argument('--node')
 args = parser.parse_args()
 
 n_blob = 10
-n_small = 100_000
+n_small = 50_000_000
 size_blob = 10_000_000
 runtime = 3600
 
