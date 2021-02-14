@@ -2,7 +2,10 @@
 
 import argparse
 import subprocess
-
+import math
+import random
+import time
+from cassandra.cluster import Cluster
 
 parser = argparse.ArgumentParser(description='Background reclaim tester')
 parser.add_argument('mode', choices=['populate', 'run'])
@@ -21,15 +24,29 @@ def unnl(s):
     return re.sub(r'\s+', ' ', s)
 
 if args.mode == 'populate':
-    subprocess.run(
-        unnl(
-            f'''
-            cassandra-stress write n={n_blob} no-warmup -node {args.node}
-            -rate threads=1 -schema keyspace=blobspace
-            -col names=blob size="FIXED({size_blob})"
-            '''),
-        shell=True, check=True
-    )
+    cluster = Cluster([args.node])
+    session = cluster.connect()
+    session.execute('''
+        create keyspace if not exists blobspace
+        with replication = { 'class' : 'SimpleStrategy',
+                             'replication_factor': 1 }
+    ''')
+    session.execute('use blobspace')
+    session.execute('''
+        create table if not exists tab (
+            pk int,
+            ck int,
+            v blob,
+            primary key (pk, ck)
+        )
+    ''')
+    ps1 = session.prepare('insert into tab (pk, ck, v) values (?, ?, ?)')
+
+    fragment = b'x' * 128_000
+    for pk in range(n_blob):
+        for ck in range(math.ceil(size_blob // len(fragment))):
+            session.execute(ps1, (pk, ck, fragment))
+
     subprocess.run(
         unnl(f'''
             cassandra-stress write n={n_small} no-warmup -node {args.node}
@@ -47,14 +64,17 @@ else:
             | tee small.txt
         '''),
         shell=True)
-    p2 = subprocess.Popen(
-        unnl(f'''
-            cassandra-stress mixed duration={runtime}s no-warmup -node {args.node}
-            -rate threads=1 fixed=1/s -schema keyspace=blobspace
-            -col names=blob size="FIXED({size_blob})"
-            -pop dist="seq(1..{n_blob})"
-            | tee blob.txt
-        '''),
-        shell=True)
+    start = time.monotonic()
+
+    cluster = Cluster([args.node])
+    session = cluster.connect()
+    session.execute('use blobspace')
+    ps1 = session.prepare('select ck, v from tab where pk = ?')
+
+    while time.monotonic() < start + runtime:
+        pk = random.randint(0, n_blob - 1)
+        records = session.execute(ps1, (pk,))
+        for r in records:
+            pass
+        time.sleep(1)
     p1.wait()
-    p2.wait()
